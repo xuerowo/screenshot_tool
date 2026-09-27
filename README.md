@@ -91,7 +91,6 @@ screenshot_tool/
   smoke_test.py    冒煙測試（python smoke_test.py）
   requirements.txt 相依套件
   start.bat        Windows 一鍵啟動
-  DESIGN.md        設計文件
   LICENSE          MIT 授權條款
   .gitignore
 ```
