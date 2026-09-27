@@ -1,0 +1,5 @@
+PyQt6>=6.5
+mss>=9.0
+Pillow>=10.0
+# 選用：啟用全域快速鍵（F9 手動加拍）。未安裝則以視窗內按鈕代替。
+keyboard>=0.13.5 ; platform_system == "Windows"

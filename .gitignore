@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# 本機執行期設定（含本機絕對路徑，不進版控；不存在時程式會用預設值）
+config.json
+
+# 截圖輸出目錄
+screenshots/
+
+# 編輯器 / 作業系統
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
