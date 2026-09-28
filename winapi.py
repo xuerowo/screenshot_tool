@@ -5,6 +5,7 @@ Win32 輔助模組：
 1. DPI 感知設定 (Per-Monitor V2) —— 必須在 QApplication 建立前呼叫。
 2. 視窗列舉 (EnumWindows) 取得可見視窗矩形，供「貼齊視窗邊緣」使用。
 3. 監視器幾何輔助 (虛擬桌面範圍)。
+4. 深色標題列、不被截圖、模擬按鍵（翻頁連拍）。
 
 所有座標皆為「物理像素」（在設定 Per-Monitor V2 後與螢幕實際像素 1:1）。
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import os
 from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -170,3 +172,96 @@ def get_virtual_screen_bounds() -> Tuple[int, int, int, int]:
     right.value = left.value + ctypes.windll.user32.GetSystemMetrics(78)
     bottom.value = top.value + ctypes.windll.user32.GetSystemMetrics(79)
     return (left.value, top.value, right.value, bottom.value)
+
+
+# ---------------------------------------------------------------------------
+# 深色標題列（Windows 10 20H1+ / Windows 11）
+# ---------------------------------------------------------------------------
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+
+
+def set_dark_title_bar(hwnd: int, dark: bool = True) -> bool:
+    """讓視窗標題列使用深色模式，與深色主題一致。不支援的系統上靜默失敗。"""
+    try:
+        value = ctypes.c_int(1 if dark else 0)
+        res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wt.HWND(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE,
+            ctypes.byref(value), ctypes.sizeof(value),
+        )
+        return res == 0
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 不被截圖（Windows 10 2004+）
+# ---------------------------------------------------------------------------
+WDA_EXCLUDEFROMCAPTURE = 0x11
+
+
+def exclude_from_capture(hwnd: int) -> bool:
+    """讓視窗不出現在任何螢幕擷取中（mss / BitBlt 會直接看到視窗後方的畫面）。
+
+    用於浮動在畫面上的迷你工具列，避免它被拍進截圖。不支援的系統上回傳 False。
+    """
+    try:
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(
+            wt.HWND(hwnd), WDA_EXCLUDEFROMCAPTURE
+        ))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 模擬按鍵（翻頁連拍）
+# ---------------------------------------------------------------------------
+# 可用的翻頁鍵：名稱 → 虛擬鍵碼
+PAGE_KEYS = {
+    "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    "pageup": 0x21, "pagedown": 0x22, "space": 0x20, "enter": 0x0D,
+}
+# 方向鍵 / PageUp / PageDown 屬於延伸鍵，需加旗標才不會被當成數字鍵盤的鍵
+_EXTENDED_KEYS = {"left", "up", "right", "down", "pageup", "pagedown"}
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+
+
+def send_key(name: str) -> bool:
+    """對目前最前面的視窗送出一次按鍵（按下 + 放開）。未知鍵名回傳 False。"""
+    vk = PAGE_KEYS.get(name)
+    if vk is None:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        scan = user32.MapVirtualKeyW(vk, 0) & 0xFF
+        flags = KEYEVENTF_EXTENDEDKEY if name in _EXTENDED_KEYS else 0
+        user32.keybd_event(vk, scan, flags, 0)
+        user32.keybd_event(vk, scan, flags | KEYEVENTF_KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def foreground_is_own_process() -> bool:
+    """最前面的視窗是否屬於本程式（是的話，送出的按鍵會被自己吃掉）。"""
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wt.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value == os.getpid()
+    except Exception:
+        return False
+
+
+_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)   # Shift, Ctrl, Alt, 左 Win, 右 Win
+
+
+def modifiers_down() -> bool:
+    """目前是否有 Shift / Ctrl / Alt / Win 被按著（實體按鍵狀態）。"""
+    try:
+        user32 = ctypes.windll.user32
+        return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MODIFIER_VKS)
+    except Exception:
+        return False

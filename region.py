@@ -15,7 +15,9 @@ DPI 說明（本工具一切以「物理像素」為準）：
 - 貼齊視窗邊緣：拖曳邊界接近視窗邊界時自動吸附。
 - 鍵盤微調：方向鍵移動 1px / Shift 10px / Ctrl+方向鍵移動單邊 1px。
 - 選取視窗：一鍵抓取游標下的目標視窗。
+- 多定點：其他已設定的定點以虛線框顯示作為參考；重新選取時以原區域為起點微調。
 - 確認 Enter / 取消 Esc。
+- 控制列不擋畫面：拖曳時自動隱藏、自動避開選取框（下方 ↔ 上方）、放大鏡避開控制列、H 鍵手動隱藏。
 """
 from __future__ import annotations
 
@@ -43,6 +45,7 @@ import winapi
 from config import Config, Region
 
 LOUPE_LOGICAL = 200  # 放大鏡顯示邊長（邏輯像素）
+BAR_W, BAR_H, BAR_MARGIN = 680, 80, 18   # 控制列尺寸與離畫面邊緣距離（邏輯像素）
 DEFAULT_ZOOM = 4
 
 # 選取框的 8 個控制點（4 角 + 4 邊中點）
@@ -77,7 +80,12 @@ class RegionSelector(QWidget):
     # 完成時發出：成功帶 Region，取消帶 None
     finished = pyqtSignal(object)
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        initial: Optional[Region] = None,
+        others: Optional[List[Region]] = None,
+    ):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
@@ -91,6 +99,10 @@ class RegionSelector(QWidget):
         self._dpr = 1.0              # 本窗格的 devicePixelRatio (物理/邏輯)
         self._window_rects: List[Tuple[int, int, int, int]] = []
         self._selection: Optional[Tuple[int, int, int, int]] = None  # 絕對物理
+        if initial is not None and initial.is_valid():
+            self._selection = tuple(initial)
+        # 其他定點（僅供參考顯示，不可編輯）
+        self._others: List[Region] = [r for r in (others or []) if r.is_valid()]
         self._drag_start: Optional[Tuple[int, int]] = None
         self._dragging = False
         self._cursor_abs = (0, 0)    # 絕對物理
@@ -105,6 +117,7 @@ class RegionSelector(QWidget):
         self._move_start_sel: Tuple[int, int, int, int] = (0, 0, 0, 0)
         self._resize_start_sel: Tuple[int, int, int, int] = (0, 0, 0, 0)
         self._hover_grip: Optional[str] = None    # 游標目前所在的控制點（無按鍵）
+        self._bar_enabled = True                  # H 鍵切換控制列顯示
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -118,28 +131,37 @@ class RegionSelector(QWidget):
         bar = QWidget(self)
         bar.setObjectName("bar")
         bar.setStyleSheet(
-            "#bar { background: rgba(0,0,0,190); border-radius:6px; }"
-            "QPushButton { background:#333; color:#fff; border:1px solid #777;"
-            " padding:4px 10px; border-radius:4px; }"
-            "QPushButton:hover { background:#555; }"
+            "#bar { background: rgba(21,23,28,245); border: 1px solid rgba(255,255,255,20);"
+            " border-radius: 12px; }"
+            "QLabel { color: #8b93a1; background: transparent; }"
+            "QPushButton { background: #262a33; color: #e7e9ee; border: 1px solid #2f343e;"
+            " padding: 5px 12px; border-radius: 8px; }"
+            "QPushButton:hover { background: #30353f; }"
+            "QPushButton#ok { background: #4f8cff; border-color: #4f8cff; color: #fff;"
+            " font-weight: 600; }"
+            "QPushButton#ok:hover { background: #6b9fff; }"
+            "QPushButton#cancel { background: rgba(239,91,91,0.12); color: #ef5b5b;"
+            " border-color: rgba(239,91,91,0.45); }"
+            "QPushButton#cancel:hover { background: rgba(239,91,91,0.22); }"
         )
         # 提示列（鍵盤/滑鼠操作）＋ 按鈕列
         vlay = QVBoxLayout(bar)
-        vlay.setContentsMargins(8, 5, 8, 5)
-        vlay.setSpacing(4)
+        vlay.setContentsMargins(12, 8, 12, 10)
+        vlay.setSpacing(6)
 
         hint = QLabel(
-            "滑鼠：拖曳框選 ・ 框內拖曳移動 ・ 拖控制點縮放　　　"
-            "鍵盤：方向鍵微調位置 ・ Shift 10px ・ Ctrl 調整單邊　　　"
-            "＋/－ 放大鏡倍率 ・ Enter 確認 ・ Esc 取消"
+            "滑鼠：拖曳框選 ・ 框內拖曳移動 ・ 拖控制點縮放　　"
+            "鍵盤：方向鍵微調 ・ Shift 10px ・ Ctrl 調整單邊\n"
+            "＋/－ 放大鏡倍率 ・ H 隱藏面板 ・ Enter 確認 ・ Esc 取消"
         )
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color:#ddd; font-size:10px;")
+        f = hint.font()
+        f.setPointSizeF(max(7.5, f.pointSizeF() - 1.5))
+        hint.setFont(f)
         vlay.addWidget(hint)
 
         hlay = QHBoxLayout()
-        hlay.setSpacing(4)
+        hlay.setSpacing(6)
 
         btn_zoom_out = QPushButton("－", bar)
         btn_zoom_out.setToolTip("縮小放大倍率")
@@ -147,10 +169,14 @@ class RegionSelector(QWidget):
         btn_zoom_in.setToolTip("放大倍率")
         btn_win = QPushButton("選取游標下視窗", bar)
         btn_win.setToolTip("抓取游標所在的頂層視窗")
-        btn_ok = QPushButton("確認 (Enter)", bar)
-        btn_ok.setStyleSheet("background:#2e7d32; color:#fff; font-weight:bold;")
+        btn_ok = QPushButton("✓  確認 (Enter)", bar)
+        btn_ok.setObjectName("ok")
         btn_cancel = QPushButton("取消 (Esc)", bar)
-        btn_cancel.setStyleSheet("background:#a33; color:#fff;")
+        btn_cancel.setObjectName("cancel")
+        for b in (btn_zoom_out, btn_zoom_in, btn_win, btn_ok, btn_cancel):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 按鈕不搶鍵盤焦點，點過之後方向鍵 / ＋－ / Enter 仍由遮罩處理
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         btn_zoom_out.clicked.connect(lambda: self._set_zoom(self.zoom // 2))
         btn_zoom_in.clicked.connect(lambda: self._set_zoom(self.zoom * 2))
@@ -389,10 +415,23 @@ class RegionSelector(QWidget):
         """計算放大鏡在邏輯畫面上的位置（放在游標右下方）。"""
         cx = self._lx(self._cursor_abs[0])
         cy = self._ly(self._cursor_abs[1])
-        ox = cx + 24
-        oy = cy + 24
-        ox = max(0.0, min(ox, self.width() - LOUPE_LOGICAL))
-        oy = max(0.0, min(oy, self.height() - LOUPE_LOGICAL))
+        bar = self._bar_geometry()
+        L = LOUPE_LOGICAL
+        # 依序嘗試：右下 → 右上 → 左下 → 左上，取第一個不被控制列蓋住的位置
+        candidates = [
+            (cx + 24, cy + 24), (cx + 24, cy - 24 - L),
+            (cx - 24 - L, cy + 24), (cx - 24 - L, cy - 24 - L),
+        ]
+        clamped = [
+            (max(0.0, min(ox, self.width() - L)), max(0.0, min(oy, self.height() - L)))
+            for ox, oy in candidates
+        ]
+        ox, oy = clamped[0]
+        if bar is not None:
+            for x, y in clamped:
+                if not QRectF(x, y, L, L).intersects(QRectF(bar)):
+                    ox, oy = x, y
+                    break
         self._loupe_geom = (round(ox), round(oy))
 
     # ------------------------------------------------------------------
@@ -449,6 +488,18 @@ class RegionSelector(QWidget):
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._accept()
+            return
+        # 放大鏡倍率：主鍵盤 = / + / - / _ 與數字鍵盤 + / - 皆可（不必按 Shift）
+        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._set_zoom(self.zoom * 2)
+            return
+        if key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+            self._set_zoom(self.zoom // 2)
+            return
+        if key == Qt.Key.Key_H:
+            self._bar_enabled = not self._bar_enabled
+            self._position_loupe_logical()
+            self.update()
             return
 
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -539,6 +590,7 @@ class RegionSelector(QWidget):
             painter.fillRect(self.rect(), QColor(20, 20, 20))
 
         self._paint_crosshair(painter)
+        self._paint_others(painter)
         self._paint_selection(painter)
         self._paint_loupe(painter)
 
@@ -557,6 +609,22 @@ class RegionSelector(QWidget):
         painter.setPen(pen)
         painter.drawLine(round(cx), 0, round(cx), self.height())
         painter.drawLine(0, round(cy), self.width(), round(cy))
+
+    def _paint_others(self, painter: QPainter) -> None:
+        """以橘色虛線框標出其他已設定的定點，方便對齊與避免重疊。"""
+        pen = QPen(QColor(255, 170, 0, 200))
+        pen.setWidth(1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        for r in self._others:
+            rect = QRectF(self._lx(r.left), self._ly(r.top),
+                          r.width / self._dpr, r.height / self._dpr)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+            if r.name:
+                tag = QRectF(rect.x(), rect.y(), 8 + 7 * len(r.name), 16)
+                painter.fillRect(tag, QColor(255, 170, 0, 200))
+                painter.setPen(QColor(0, 0, 0))
+                painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, r.name)
 
     def _paint_selection(self, painter: QPainter) -> None:
         if self._selection is None:
@@ -674,9 +742,40 @@ class RegionSelector(QWidget):
 
         painter.drawImage(self._loupe_geom[0], self._loupe_geom[1], loupe_img)
 
+    def _bar_geometry(self) -> Optional[QRect]:
+        """控制列應在的位置；拖曳中或使用者按 H 隱藏時回傳 None。
+
+        預設放在下方中央；若會蓋住選取框（或其他定點）就改放上方中央，
+        兩邊都會蓋住時選擇遮擋面積較小的一邊（選取框權重較高）。
+        """
+        if not self._bar_enabled or self._action is not None:
+            return None
+        x = (self.width() - BAR_W) // 2
+        candidates = [
+            QRect(x, self.height() - BAR_H - BAR_MARGIN, BAR_W, BAR_H),   # 下方
+            QRect(x, BAR_MARGIN, BAR_W, BAR_H),                           # 上方
+        ]
+        obstacles = [
+            (QRectF(self._lx(r.left), self._ly(r.top), r.width / self._dpr, r.height / self._dpr), 1.0)
+            for r in self._others
+        ]
+        sel = self._sel_rect_logical()
+        if sel is not None:
+            obstacles.append((QRectF(*sel), 100.0))
+
+        def covered(rect: QRect) -> float:
+            total = 0.0
+            for ob, weight in obstacles:
+                inter = QRectF(rect).intersected(ob)
+                total += inter.width() * inter.height() * weight
+            return total
+
+        return min(candidates, key=covered)   # 同分時保留下方
+
     def _position_bar(self) -> None:
         bar = self._bar
-        bw = 640
-        bh = 64
-        bar.setGeometry((self.width() - bw) // 2, self.height() - bh - 18, bw, bh)
-        bar.show()
+        geom = self._bar_geometry()
+        if geom is not None and bar.geometry() != geom:
+            bar.setGeometry(geom)
+        if bar.isHidden() == (geom is not None):
+            bar.setVisible(geom is not None)

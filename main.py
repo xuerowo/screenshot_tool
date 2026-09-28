@@ -25,6 +25,9 @@ def main() -> int:
     app.setApplicationName("RegionShot")
     app.setOrganizationName("RegionShot")
 
+    from theme import apply_theme
+    apply_theme(app)
+
     if not aware:
         QMessageBox.warning(
             None,
